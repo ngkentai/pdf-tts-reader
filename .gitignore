@@ -1,0 +1,9 @@
+*.wav
+*.mp3
+*.pdf
+*_tts/
+*_reader/
+__pycache__/
+.venv/
+*.pyc
+timestamps.json
