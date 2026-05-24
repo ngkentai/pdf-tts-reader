@@ -39,6 +39,20 @@ def _is_toc_entry(text: str) -> bool:
     return bool(_TOC_ENTRY.match(text))
 
 
+def clean_for_tts(text: str) -> str:
+    """Remove PDF artefacts that sound bad when spoken aloud."""
+    # Fix hyphenated line-breaks: "transac- tion" → "transaction"
+    # (only joins when there's a space after the hyphen, preserving "well-known")
+    text = re.sub(r"(\w)-\s+(\w)", r"\1\2", text)
+    # Remove citation brackets: [1], [2, 3], [ 61 ], [1–3]
+    text = re.sub(r"\s*\[\s*[\d,;\s–—–—]+\s*\]", "", text)
+    # Remove parenthetical citation numbers: (1), (2,3)
+    text = re.sub(r"\s*\(\s*\d+(?:\s*[,;]\s*\d+)*\s*\)", "", text)
+    # Collapse extra whitespace left behind
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def _is_figure_noise(text: str, bbox: tuple, col_width: float) -> bool:
     """True for inline figure text (axis labels, legends, chart titles)."""
     w = bbox[2] - bbox[0]
@@ -229,6 +243,10 @@ def parse_pdf(path: str, include_captions: bool = False,
             or size > body_size + 1.5
             or (is_bold and size >= body_size - 0.5 and len(text) < 120)
         )
+
+        text = clean_for_tts(text)
+        if not text:
+            continue
 
         if not title_emitted and (size > body_size + 1 or is_heading):
             blocks.append(Block("title", text, page))

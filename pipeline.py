@@ -164,36 +164,45 @@ def assign_timings(blocks: list[Block], whisper_words: list[dict],
 
 def generate_html(blocks: list[Block], per_block_timings: list[list[dict]],
                   audio_filename: str, output_path: Path):
-    # Flatten all (start, end) pairs into one JS array indexed by global word index
+    # Flatten timings and collect chapter metadata
     all_timings: list[dict] = []
-    for timings in per_block_timings:
+    chapters: list[dict] = []   # [{title, startTime}]
+
+    word_idx = 0
+    for block, timings in zip(blocks, per_block_timings):
+        if block.type in ("title", "heading") and timings:
+            chapters.append({
+                "title": block.text[:70],
+                "t": round(timings[0]["start"], 3),
+            })
         all_timings.extend(timings)
+        word_idx += len(block.text.split())
 
     timings_json = json.dumps(
         [{"s": round(t["start"], 3), "e": round(t["end"], 3)} for t in all_timings]
     )
-
+    chapters_json = json.dumps(chapters)
     audio_type = "audio/wav" if audio_filename.endswith(".wav") else "audio/mpeg"
 
-    # Build content HTML: each word gets a <span class="w" data-i="N">
+    # Build content HTML
     word_idx = 0
     content_parts: list[str] = []
-
     for block, timings in zip(blocks, per_block_timings):
         tokens = re.findall(r"\S+|\s+", block.text)
         inner_parts: list[str] = []
         for token in tokens:
             if token.strip():
-                inner_parts.append(f'<span class="w" data-i="{word_idx}">{_esc(token)}</span>')
+                inner_parts.append(
+                    f'<span class="w" data-i="{word_idx}">{_esc(token)}</span>'
+                )
                 word_idx += 1
             else:
                 inner_parts.append(token)
         inner = "".join(inner_parts)
-
         if block.type == "title":
-            content_parts.append(f"<h1>{inner}</h1>")
+            content_parts.append(f'<h1 id="ch-{len(content_parts)}">{inner}</h1>')
         elif block.type == "heading":
-            content_parts.append(f"<h2>{inner}</h2>")
+            content_parts.append(f'<h2 id="ch-{len(content_parts)}">{inner}</h2>')
         else:
             content_parts.append(f"<p>{inner}</p>")
 
@@ -210,14 +219,45 @@ def generate_html(blocks: list[Block], per_block_timings: list[list[dict]],
     *{{box-sizing:border-box;margin:0;padding:0}}
     html{{-webkit-text-size-adjust:100%}}
     body{{font-family:Georgia,'Times New Roman',serif;font-size:19px;line-height:1.8;
-         color:#111;background:#faf9f7}}
+         color:#111;background:#faf9f7;padding-bottom:120px}}
+
+    /* ── Player bar ── */
     #bar{{position:sticky;top:0;z-index:100;background:#fff;
-          border-bottom:1px solid #ddd;padding:8px 12px;display:flex;
-          flex-direction:column;gap:4px;box-shadow:0 1px 4px rgba(0,0,0,.07)}}
-    audio{{width:100%;height:44px}}
-    #info{{font-family:-apple-system,sans-serif;font-size:11px;color:#888;
-           display:flex;justify-content:space-between;padding:0 2px}}
-    #content{{max-width:700px;margin:0 auto;padding:20px 16px 100px}}
+          border-bottom:1px solid #ddd;padding:8px 12px 6px;
+          display:flex;flex-direction:column;gap:5px;
+          box-shadow:0 1px 6px rgba(0,0,0,.08)}}
+
+    /* row 1: play/pause + rewind + time + speed */
+    #controls{{display:flex;align-items:center;gap:8px;font-family:-apple-system,sans-serif}}
+    #btn-play{{font-size:22px;background:none;border:none;cursor:pointer;
+               padding:0 2px;line-height:1;color:#222}}
+    #btn-back{{font-size:14px;background:none;border:none;cursor:pointer;
+               padding:0 2px;color:#555}}
+    #time{{font-size:12px;color:#777;flex:1;text-align:right}}
+    #speed{{font-size:12px;padding:2px 4px;border:1px solid #ccc;border-radius:4px;
+            background:#fff;cursor:pointer}}
+
+    /* row 2: progress bar with chapter markers */
+    #progress-wrap{{position:relative;height:20px;cursor:pointer}}
+    #prog-track{{position:absolute;top:50%;transform:translateY(-50%);
+                 left:0;right:0;height:4px;background:#ddd;border-radius:2px}}
+    #prog-fill{{height:100%;background:#e8a020;border-radius:2px;width:0%;
+                transition:width 0.25s linear;pointer-events:none}}
+    .ch-mark{{position:absolute;top:50%;transform:translate(-50%,-50%);
+              width:3px;height:12px;background:#888;border-radius:1px;
+              cursor:pointer;z-index:2}}
+    .ch-mark:hover::after{{content:attr(data-title);position:absolute;
+      bottom:16px;left:50%;transform:translateX(-50%);
+      background:#333;color:#fff;font-size:10px;font-family:-apple-system,sans-serif;
+      white-space:nowrap;padding:2px 6px;border-radius:3px;pointer-events:none;
+      max-width:200px;overflow:hidden;text-overflow:ellipsis}}
+
+    /* row 3: word counter */
+    #winfo{{font-family:-apple-system,sans-serif;font-size:11px;color:#aaa;
+            text-align:right;padding-right:2px}}
+
+    /* ── Content ── */
+    #content{{max-width:700px;margin:0 auto;padding:20px 16px 60px}}
     h1{{font-size:1.45em;margin:0.6em 0 0.5em;line-height:1.3}}
     h2{{font-size:1.15em;color:#2c2c2c;margin:1.6em 0 0.35em;
         border-bottom:1px solid #e8e8e8;padding-bottom:3px}}
@@ -227,9 +267,14 @@ def generate_html(blocks: list[Block], per_block_timings: list[list[dict]],
     .w:hover{{background:#f0e8aa}}
     .w.active{{background:#ffe566;color:#000}}
     .w.past{{color:#bbb}}
+
     @media(prefers-color-scheme:dark){{
       body{{background:#1c1c1e;color:#e5e5ea}}
       #bar{{background:#1c1c1e;border-color:#3a3a3c;box-shadow:none}}
+      #btn-play{{color:#e5e5ea}} #btn-back{{color:#aaa}}
+      #speed{{background:#2c2c2e;border-color:#48484a;color:#e5e5ea}}
+      #prog-track{{background:#3a3a3c}} #prog-fill{{background:#c8901a}}
+      .ch-mark{{background:#888}}
       h2{{color:#c7c7cc;border-color:#3a3a3c}}
       .w:hover{{background:#3a3a3c}}
       .w.active{{background:#b8860b;color:#fff}}
@@ -239,25 +284,46 @@ def generate_html(blocks: list[Block], per_block_timings: list[list[dict]],
 </head>
 <body>
 <div id="bar">
-  <audio id="player" controls preload="auto">
+  <audio id="player" preload="auto">
     <source src="{audio_filename}" type="{audio_type}">
   </audio>
-  <div id="info">
-    <span id="wpos">Word 0 / {total_words}</span>
-    <span id="tpos">0:00 / 0:00</span>
+  <div id="controls">
+    <button id="btn-play" title="Play/Pause">▶</button>
+    <button id="btn-back" title="Back 10s">↺10s</button>
+    <span id="time">0:00 / 0:00</span>
+    <select id="speed" title="Playback speed">
+      <option value="0.8">0.8×</option>
+      <option value="1" selected>1×</option>
+      <option value="1.3">1.3×</option>
+      <option value="1.6">1.6×</option>
+    </select>
   </div>
+  <div id="progress-wrap">
+    <div id="prog-track">
+      <div id="prog-fill"></div>
+    </div>
+    <!-- chapter markers injected by JS after audio loads -->
+  </div>
+  <div id="winfo">Word 0 / {total_words}</div>
 </div>
 <div id="content">
 {content_html}
 </div>
 <script>
 const T={timings_json};
+const CHAPTERS={chapters_json};
 const player=document.getElementById('player');
-const wposEl=document.getElementById('wpos');
-const tposEl=document.getElementById('tpos');
+const btnPlay=document.getElementById('btn-play');
+const btnBack=document.getElementById('btn-back');
+const timeEl=document.getElementById('time');
+const speedSel=document.getElementById('speed');
+const progFill=document.getElementById('prog-fill');
+const progWrap=document.getElementById('progress-wrap');
+const winfoEl=document.getElementById('winfo');
 const spans=document.querySelectorAll('.w');
 let cur=-1,scrollLock=false;
 
+/* ── Helpers ── */
 function bs(t){{
   let lo=0,hi=T.length-1;
   while(lo<=hi){{
@@ -268,27 +334,70 @@ function bs(t){{
   }}
   return -1;
 }}
-
 function fmt(s){{
   if(!isFinite(s))return'0:00';
-  return Math.floor(s/60)+':'+(''+(Math.floor(s)%60)).padStart(2,'0');
+  const m=Math.floor(s/60),sc=Math.floor(s)%60;
+  return m+':'+(sc<10?'0':'')+sc;
 }}
 
+/* ── Controls ── */
+btnPlay.addEventListener('click',()=>{{
+  if(player.paused){{player.play();btnPlay.textContent='⏸';}}
+  else{{player.pause();btnPlay.textContent='▶';}}
+}});
+player.addEventListener('ended',()=>btnPlay.textContent='▶');
+btnBack.addEventListener('click',()=>{{player.currentTime=Math.max(0,player.currentTime-10);}});
+speedSel.addEventListener('change',()=>{{player.playbackRate=parseFloat(speedSel.value);}});
+
+/* ── Chapter markers on progress bar ── */
+player.addEventListener('loadedmetadata',()=>{{
+  const dur=player.duration;
+  CHAPTERS.forEach(ch=>{{
+    const pct=ch.t/dur*100;
+    const mk=document.createElement('div');
+    mk.className='ch-mark';
+    mk.style.left=pct+'%';
+    mk.setAttribute('data-title',ch.title);
+    mk.setAttribute('data-t',ch.t);
+    mk.addEventListener('click',e=>{{
+      e.stopPropagation();
+      player.currentTime=ch.t;
+      if(player.paused)player.play();
+    }});
+    progWrap.appendChild(mk);
+  }});
+}});
+
+/* ── Progress bar scrubbing ── */
+function seekTo(e){{
+  const rect=progWrap.getBoundingClientRect();
+  const pct=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width));
+  player.currentTime=pct*(player.duration||0);
+}}
+progWrap.addEventListener('click',seekTo);
+progWrap.addEventListener('touchend',e=>{{seekTo(e.changedTouches[0]);e.preventDefault();}},{{passive:false}});
+
+/* ── Time update ── */
 player.addEventListener('timeupdate',()=>{{
-  const t=player.currentTime;
-  tposEl.textContent=fmt(t)+' / '+fmt(player.duration);
+  const t=player.currentTime,dur=player.duration||1;
+  timeEl.textContent=fmt(t)+' / '+fmt(dur);
+  progFill.style.width=(t/dur*100)+'%';
+
   const idx=bs(t);
   if(idx===cur)return;
-  if(cur>=0&&cur<spans.length){{spans[cur].classList.remove('active');spans[cur].classList.add('past');}}
+  if(cur>=0&&cur<spans.length){{
+    spans[cur].classList.remove('active');
+    spans[cur].classList.add('past');
+  }}
   cur=idx;
   if(idx>=0&&idx<spans.length){{
     spans[idx].classList.add('active');
     if(!scrollLock)spans[idx].scrollIntoView({{behavior:'smooth',block:'center'}});
-    wposEl.textContent='Word '+(idx+1)+' / {total_words}';
+    winfoEl.textContent='Word '+(idx+1)+' / {total_words}';
   }}
 }});
 
-// Reset past-word shading on seek
+/* ── Seek resets past shading ── */
 player.addEventListener('seeked',()=>{{
   const t=player.currentTime;
   spans.forEach((s,i)=>{{
@@ -298,19 +407,19 @@ player.addEventListener('seeked',()=>{{
   cur=-1;
 }});
 
-// Tap word → seek to it
+/* ── Tap word → seek ── */
 spans.forEach((span,i)=>{{
   span.addEventListener('click',()=>{{
-    if(i<T.length){{player.currentTime=T[i].s;player.play();}}
+    if(i<T.length){{player.currentTime=T[i].s;player.play();btnPlay.textContent='⏸';}}
   }});
 }});
 
-// Pause auto-scroll when user scrolls manually, resume after 3 s
+/* ── Pause auto-scroll on manual scroll, resume after 3 s ── */
 let scrollTimer;
 window.addEventListener('scroll',()=>{{
   scrollLock=true;
   clearTimeout(scrollTimer);
-  scrollTimer=setTimeout(()=>{{scrollLock=false;}},3000);
+  scrollTimer=setTimeout(()=>scrollLock=false,3000);
 }},{{passive:true}});
 </script>
 </body>
