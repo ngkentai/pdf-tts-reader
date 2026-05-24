@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from parser import Block, parse_pdf
+from parser import Block, parse_pdf, extract_references, extract_figure_images
 
 SAMPLE_RATE = 24000  # Kokoro output sample rate
 
@@ -52,7 +52,7 @@ def run_tts(blocks: list[Block], voice: str = "af_heart", speed: float = 1.0):
         print(f"  [{i+1}/{len(blocks)}] {label}: {preview}…")
 
         chunk_parts: list[np.ndarray] = []
-        for _, _, audio in pipeline(block.text, voice=voice, speed=speed):
+        for _, _, audio in pipeline(block.tts_text, voice=voice, speed=speed):
             arr = audio.numpy() if hasattr(audio, "numpy") else np.array(audio)
             chunk_parts.append(arr.astype(np.float32))
 
@@ -135,8 +135,9 @@ def assign_timings(blocks: list[Block], whisper_words: list[dict],
         # Whisper words that fall in this block's time window
         ww = [w for w in whisper_words if t_start <= w["start"] < t_end]
 
-        # Display words
-        display_words = block.text.split()
+        # Use tts_text word count — matches what was actually spoken and
+        # what the HTML will emit as .w spans (citations stripped from both)
+        display_words = block.tts_text.split()
         N = len(display_words)
         M = len(ww)
 
@@ -162,47 +163,102 @@ def assign_timings(blocks: list[Block], whisper_words: list[dict],
 # HTML viewer
 # ---------------------------------------------------------------------------
 
+def _build_block_html(text: str, word_idx: int,
+                      figures: dict[int, str]) -> tuple[str, int]:
+    """Tokenize block text into HTML spans.
+
+    - [N] / [N,M] citation tokens → <span class="ref"> (not a .w span, not counted)
+    - Fig N / Figure N text       → <span class="w figref"> (counted, clickable)
+    - all other non-space tokens  → <span class="w"> (counted)
+    """
+    # Find special regions: citations and figure references
+    specials: list[tuple[int, int, str, str]] = []  # (start, end, kind, data)
+
+    for m in re.finditer(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]", text):
+        specials.append((m.start(), m.end(), "ref", m.group(1)))
+
+    for m in re.finditer(r"\b(Fig(?:ure)?\.?\s*(\d+))\b", text, re.I):
+        # Only mark as figref if we actually have that figure image
+        if int(m.group(2)) in figures:
+            specials.append((m.start(), m.end(), "fig", m.group(2)))
+
+    specials.sort(key=lambda x: x[0])
+
+    parts: list[str] = []
+    pos = 0
+
+    def emit_plain(chunk: str) -> None:
+        nonlocal word_idx
+        for tok in re.findall(r"\S+|\s+", chunk):
+            if tok.strip():
+                parts.append(
+                    f'<span class="w" data-i="{word_idx}">{_esc(tok)}</span>'
+                )
+                word_idx += 1
+            else:
+                parts.append(tok)
+
+    for s_start, s_end, kind, data in specials:
+        if s_start < pos:          # already consumed (overlap guard)
+            continue
+        emit_plain(text[pos:s_start])
+        raw = text[s_start:s_end]
+        if kind == "ref":
+            nums = re.sub(r"\s", "", data)   # "1,2" normalised
+            parts.append(
+                f'<span class="ref" data-n="{_esc(nums)}">{_esc(raw)}</span>'
+            )
+        elif kind == "fig":
+            parts.append(
+                f'<span class="w figref" data-i="{word_idx}" '
+                f'data-fig="{data}">{_esc(raw)}</span>'
+            )
+            word_idx += 1        # figref words ARE counted (they're spoken)
+        pos = s_end
+
+    emit_plain(text[pos:])
+    return "".join(parts), word_idx
+
+
 def generate_html(blocks: list[Block], per_block_timings: list[list[dict]],
-                  audio_filename: str, output_path: Path):
+                  audio_filename: str, output_path: Path,
+                  refs: dict[int, str] | None = None,
+                  figures: dict[int, str] | None = None):
+    refs = refs or {}
+    figures = figures or {}
+
     # Flatten timings and collect chapter metadata
     all_timings: list[dict] = []
-    chapters: list[dict] = []   # [{title, startTime}]
+    chapters: list[dict] = []
 
-    word_idx = 0
     for block, timings in zip(blocks, per_block_timings):
         if block.type in ("title", "heading") and timings:
-            chapters.append({
-                "title": block.text[:70],
-                "t": round(timings[0]["start"], 3),
-            })
+            chapters.append({"title": block.tts_text[:70], "t": round(timings[0]["start"], 3)})
         all_timings.extend(timings)
-        word_idx += len(block.text.split())
 
     timings_json = json.dumps(
         [{"s": round(t["start"], 3), "e": round(t["end"], 3)} for t in all_timings]
     )
     chapters_json = json.dumps(chapters)
+    refs_json = json.dumps({str(k): v for k, v in refs.items()})
+    # figures are embedded as data-URIs directly in the HTML spans
+    figures_json = json.dumps({
+        str(k): f"data:image/png;base64,{v}" for k, v in figures.items()
+    })
     audio_type = "audio/wav" if audio_filename.endswith(".wav") else "audio/mpeg"
 
     # Build content HTML
     word_idx = 0
     content_parts: list[str] = []
+    ch_count = 0
     for block, timings in zip(blocks, per_block_timings):
-        tokens = re.findall(r"\S+|\s+", block.text)
-        inner_parts: list[str] = []
-        for token in tokens:
-            if token.strip():
-                inner_parts.append(
-                    f'<span class="w" data-i="{word_idx}">{_esc(token)}</span>'
-                )
-                word_idx += 1
-            else:
-                inner_parts.append(token)
-        inner = "".join(inner_parts)
+        inner, word_idx = _build_block_html(block.text, word_idx, figures)
         if block.type == "title":
-            content_parts.append(f'<h1 id="ch-{len(content_parts)}">{inner}</h1>')
+            content_parts.append(f'<h1 id="ch-{ch_count}">{inner}</h1>')
+            ch_count += 1
         elif block.type == "heading":
-            content_parts.append(f'<h2 id="ch-{len(content_parts)}">{inner}</h2>')
+            content_parts.append(f'<h2 id="ch-{ch_count}">{inner}</h2>')
+            ch_count += 1
         else:
             content_parts.append(f"<p>{inner}</p>")
 
@@ -226,47 +282,54 @@ def generate_html(blocks: list[Block], per_block_timings: list[list[dict]],
           border-bottom:1px solid #ddd;padding:8px 12px 6px;
           display:flex;flex-direction:column;gap:5px;
           box-shadow:0 1px 6px rgba(0,0,0,.08)}}
-
-    /* row 1: play/pause + rewind + time + speed */
     #controls{{display:flex;align-items:center;gap:8px;font-family:-apple-system,sans-serif}}
-    #btn-play{{font-size:22px;background:none;border:none;cursor:pointer;
-               padding:0 2px;line-height:1;color:#222}}
-    #btn-back{{font-size:14px;background:none;border:none;cursor:pointer;
-               padding:0 2px;color:#555}}
+    #btn-play{{font-size:22px;background:none;border:none;cursor:pointer;padding:0 2px;line-height:1;color:#222}}
+    #btn-back{{font-size:14px;background:none;border:none;cursor:pointer;padding:0 2px;color:#555}}
     #time{{font-size:12px;color:#777;flex:1;text-align:right}}
-    #speed{{font-size:12px;padding:2px 4px;border:1px solid #ccc;border-radius:4px;
-            background:#fff;cursor:pointer}}
-
-    /* row 2: progress bar with chapter markers */
+    #speed{{font-size:12px;padding:2px 4px;border:1px solid #ccc;border-radius:4px;background:#fff;cursor:pointer}}
     #progress-wrap{{position:relative;height:20px;cursor:pointer}}
-    #prog-track{{position:absolute;top:50%;transform:translateY(-50%);
-                 left:0;right:0;height:4px;background:#ddd;border-radius:2px}}
-    #prog-fill{{height:100%;background:#e8a020;border-radius:2px;width:0%;
-                transition:width 0.25s linear;pointer-events:none}}
-    .ch-mark{{position:absolute;top:50%;transform:translate(-50%,-50%);
-              width:3px;height:12px;background:#888;border-radius:1px;
-              cursor:pointer;z-index:2}}
-    .ch-mark:hover::after{{content:attr(data-title);position:absolute;
-      bottom:16px;left:50%;transform:translateX(-50%);
-      background:#333;color:#fff;font-size:10px;font-family:-apple-system,sans-serif;
-      white-space:nowrap;padding:2px 6px;border-radius:3px;pointer-events:none;
-      max-width:200px;overflow:hidden;text-overflow:ellipsis}}
-
-    /* row 3: word counter */
-    #winfo{{font-family:-apple-system,sans-serif;font-size:11px;color:#aaa;
-            text-align:right;padding-right:2px}}
+    #prog-track{{position:absolute;top:50%;transform:translateY(-50%);left:0;right:0;height:4px;background:#ddd;border-radius:2px}}
+    #prog-fill{{height:100%;background:#e8a020;border-radius:2px;width:0%;transition:width 0.25s linear;pointer-events:none}}
+    .ch-mark{{position:absolute;top:50%;transform:translate(-50%,-50%);width:3px;height:12px;background:#888;border-radius:1px;cursor:pointer;z-index:2}}
+    .ch-mark:hover::after{{content:attr(data-title);position:absolute;bottom:16px;left:50%;transform:translateX(-50%);
+      background:#333;color:#fff;font-size:10px;font-family:-apple-system,sans-serif;white-space:nowrap;
+      padding:2px 6px;border-radius:3px;pointer-events:none;max-width:220px;overflow:hidden;text-overflow:ellipsis}}
+    #winfo{{font-family:-apple-system,sans-serif;font-size:11px;color:#aaa;text-align:right;padding-right:2px}}
 
     /* ── Content ── */
     #content{{max-width:700px;margin:0 auto;padding:20px 16px 60px}}
     h1{{font-size:1.45em;margin:0.6em 0 0.5em;line-height:1.3}}
-    h2{{font-size:1.15em;color:#2c2c2c;margin:1.6em 0 0.35em;
-        border-bottom:1px solid #e8e8e8;padding-bottom:3px}}
+    h2{{font-size:1.15em;color:#2c2c2c;margin:1.6em 0 0.35em;border-bottom:1px solid #e8e8e8;padding-bottom:3px}}
     p{{margin-bottom:1.1em}}
-    .w{{border-radius:3px;padding:0 1px;cursor:pointer;
-        transition:background 0.07s,color 0.07s}}
+    .w{{border-radius:3px;padding:0 1px;cursor:pointer;transition:background 0.07s,color 0.07s}}
     .w:hover{{background:#f0e8aa}}
     .w.active{{background:#ffe566;color:#000}}
     .w.past{{color:#bbb}}
+
+    /* ── Citation refs ── */
+    .ref{{color:#1a6fc4;cursor:pointer;font-size:0.78em;vertical-align:super;
+          line-height:0;white-space:nowrap}}
+    .ref:hover{{text-decoration:underline}}
+
+    /* ── Figure refs ── */
+    .figref{{color:#1a6fc4;cursor:pointer;border-bottom:1px dotted #1a6fc4}}
+    .figref:hover{{background:#e8f0ff}}
+    .figref.active{{background:#ffe566;color:#000;border-color:transparent}}
+    .figref.past{{color:#bbb;border-color:#bbb}}
+
+    /* ── Modal overlay ── */
+    #modal{{display:none;position:fixed;inset:0;z-index:500;
+            background:rgba(0,0,0,.55);align-items:center;justify-content:center;padding:16px}}
+    #modal.open{{display:flex}}
+    #modal-box{{background:#fff;border-radius:10px;max-width:680px;width:100%;
+                max-height:90vh;overflow-y:auto;padding:20px;position:relative;
+                font-family:-apple-system,sans-serif}}
+    #modal-close{{position:absolute;top:10px;right:14px;font-size:22px;
+                  background:none;border:none;cursor:pointer;color:#555;line-height:1}}
+    #modal-title{{font-size:14px;font-weight:600;color:#444;margin-bottom:10px}}
+    #modal-body{{font-size:14px;line-height:1.6;color:#222}}
+    #modal-body img{{max-width:100%;border-radius:4px;margin-bottom:8px}}
+    #modal-body p{{margin:0}}
 
     @media(prefers-color-scheme:dark){{
       body{{background:#1c1c1e;color:#e5e5ea}}
@@ -279,6 +342,13 @@ def generate_html(blocks: list[Block], per_block_timings: list[list[dict]],
       .w:hover{{background:#3a3a3c}}
       .w.active{{background:#b8860b;color:#fff}}
       .w.past{{color:#555}}
+      .ref{{color:#5aa4f0}}
+      .figref{{color:#5aa4f0;border-color:#5aa4f0}}
+      .figref:hover{{background:#1e2a3a}}
+      #modal-box{{background:#2c2c2e;color:#e5e5ea}}
+      #modal-close{{color:#aaa}}
+      #modal-title{{color:#aaa}}
+      #modal-body{{color:#e5e5ea}}
     }}
   </style>
 </head>
@@ -299,19 +369,29 @@ def generate_html(blocks: list[Block], per_block_timings: list[list[dict]],
     </select>
   </div>
   <div id="progress-wrap">
-    <div id="prog-track">
-      <div id="prog-fill"></div>
-    </div>
-    <!-- chapter markers injected by JS after audio loads -->
+    <div id="prog-track"><div id="prog-fill"></div></div>
   </div>
   <div id="winfo">Word 0 / {total_words}</div>
 </div>
+
+<!-- Reference / Figure modal -->
+<div id="modal">
+  <div id="modal-box">
+    <button id="modal-close" title="Close">✕</button>
+    <div id="modal-title"></div>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
 <div id="content">
 {content_html}
 </div>
 <script>
 const T={timings_json};
 const CHAPTERS={chapters_json};
+const REFS={refs_json};
+const FIGS={figures_json};
+
 const player=document.getElementById('player');
 const btnPlay=document.getElementById('btn-play');
 const btnBack=document.getElementById('btn-back');
@@ -321,9 +401,12 @@ const progFill=document.getElementById('prog-fill');
 const progWrap=document.getElementById('progress-wrap');
 const winfoEl=document.getElementById('winfo');
 const spans=document.querySelectorAll('.w');
+const modal=document.getElementById('modal');
+const modalTitle=document.getElementById('modal-title');
+const modalBody=document.getElementById('modal-body');
 let cur=-1,scrollLock=false;
 
-/* ── Helpers ── */
+/* ── Binary search ── */
 function bs(t){{
   let lo=0,hi=T.length-1;
   while(lo<=hi){{
@@ -340,25 +423,23 @@ function fmt(s){{
   return m+':'+(sc<10?'0':'')+sc;
 }}
 
-/* ── Controls ── */
+/* ── Playback controls ── */
 btnPlay.addEventListener('click',()=>{{
   if(player.paused){{player.play();btnPlay.textContent='⏸';}}
   else{{player.pause();btnPlay.textContent='▶';}}
 }});
 player.addEventListener('ended',()=>btnPlay.textContent='▶');
-btnBack.addEventListener('click',()=>{{player.currentTime=Math.max(0,player.currentTime-10);}});
-speedSel.addEventListener('change',()=>{{player.playbackRate=parseFloat(speedSel.value);}});
+btnBack.addEventListener('click',()=>player.currentTime=Math.max(0,player.currentTime-10));
+speedSel.addEventListener('change',()=>player.playbackRate=parseFloat(speedSel.value));
 
-/* ── Chapter markers on progress bar ── */
+/* ── Chapter markers ── */
 player.addEventListener('loadedmetadata',()=>{{
   const dur=player.duration;
   CHAPTERS.forEach(ch=>{{
-    const pct=ch.t/dur*100;
     const mk=document.createElement('div');
     mk.className='ch-mark';
-    mk.style.left=pct+'%';
+    mk.style.left=(ch.t/dur*100)+'%';
     mk.setAttribute('data-title',ch.title);
-    mk.setAttribute('data-t',ch.t);
     mk.addEventListener('click',e=>{{
       e.stopPropagation();
       player.currentTime=ch.t;
@@ -370,25 +451,20 @@ player.addEventListener('loadedmetadata',()=>{{
 
 /* ── Progress bar scrubbing ── */
 function seekTo(e){{
-  const rect=progWrap.getBoundingClientRect();
-  const pct=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width));
-  player.currentTime=pct*(player.duration||0);
+  const r=progWrap.getBoundingClientRect();
+  player.currentTime=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width))*(player.duration||0);
 }}
 progWrap.addEventListener('click',seekTo);
 progWrap.addEventListener('touchend',e=>{{seekTo(e.changedTouches[0]);e.preventDefault();}},{{passive:false}});
 
-/* ── Time update ── */
+/* ── Time update + word highlight ── */
 player.addEventListener('timeupdate',()=>{{
   const t=player.currentTime,dur=player.duration||1;
   timeEl.textContent=fmt(t)+' / '+fmt(dur);
   progFill.style.width=(t/dur*100)+'%';
-
   const idx=bs(t);
   if(idx===cur)return;
-  if(cur>=0&&cur<spans.length){{
-    spans[cur].classList.remove('active');
-    spans[cur].classList.add('past');
-  }}
+  if(cur>=0&&cur<spans.length){{spans[cur].classList.remove('active');spans[cur].classList.add('past');}}
   cur=idx;
   if(idx>=0&&idx<spans.length){{
     spans[idx].classList.add('active');
@@ -396,31 +472,61 @@ player.addEventListener('timeupdate',()=>{{
     winfoEl.textContent='Word '+(idx+1)+' / {total_words}';
   }}
 }});
-
-/* ── Seek resets past shading ── */
 player.addEventListener('seeked',()=>{{
   const t=player.currentTime;
-  spans.forEach((s,i)=>{{
-    s.classList.remove('active','past');
-    if(i<T.length&&T[i].e<t)s.classList.add('past');
-  }});
+  spans.forEach((s,i)=>{{s.classList.remove('active','past');if(i<T.length&&T[i].e<t)s.classList.add('past');}});
   cur=-1;
 }});
 
 /* ── Tap word → seek ── */
 spans.forEach((span,i)=>{{
+  if(span.classList.contains('figref'))return; // figref has its own handler
   span.addEventListener('click',()=>{{
     if(i<T.length){{player.currentTime=T[i].s;player.play();btnPlay.textContent='⏸';}}
   }});
 }});
 
-/* ── Pause auto-scroll on manual scroll, resume after 3 s ── */
+/* ── Manual scroll lock ── */
 let scrollTimer;
 window.addEventListener('scroll',()=>{{
-  scrollLock=true;
-  clearTimeout(scrollTimer);
+  scrollLock=true;clearTimeout(scrollTimer);
   scrollTimer=setTimeout(()=>scrollLock=false,3000);
 }},{{passive:true}});
+
+/* ── Modal helpers ── */
+function openModal(title,bodyHtml){{
+  modalTitle.textContent=title;
+  modalBody.innerHTML=bodyHtml;
+  modal.classList.add('open');
+}}
+function closeModal(){{modal.classList.remove('open');}}
+document.getElementById('modal-close').addEventListener('click',closeModal);
+modal.addEventListener('click',e=>{{if(e.target===modal)closeModal();}});
+document.addEventListener('keydown',e=>{{if(e.key==='Escape')closeModal();}});
+
+/* ── Citation refs ── */
+document.querySelectorAll('.ref').forEach(el=>{{
+  el.addEventListener('click',e=>{{
+    e.stopPropagation();
+    const nums=el.dataset.n.split(',').map(s=>s.trim());
+    const lines=nums.map(n=>{{
+      const txt=REFS[n];
+      return txt?`<p><strong>[`+n+`]</strong> `+txt+`</p>`:`<p><strong>[`+n+`]</strong> <em>Reference not found.</em></p>`;
+    }});
+    openModal('Reference'+( nums.length>1?'s':''),lines.join('<br>'));
+  }});
+}});
+
+/* ── Figure refs ── */
+document.querySelectorAll('.figref').forEach(el=>{{
+  el.addEventListener('click',e=>{{
+    e.stopPropagation();
+    const n=el.dataset.fig;
+    const src=FIGS[n];
+    if(!src)return;
+    openModal('Figure '+n,`<img src="`+src+`" alt="Figure `+n+`"><p style="color:#888;font-size:12px;margin-top:6px">Figure `+n+`</p>`);
+  }});
+}});
 </script>
 </body>
 </html>"""
@@ -481,7 +587,7 @@ def main():
         print("ERROR: no readable text found in PDF.")
         sys.exit(1)
 
-    total_words = sum(len(b.text.split()) for b in blocks)
+    total_words = sum(len(b.tts_text.split()) for b in blocks)
     est_min = total_words / 150
     print(f"  {len(blocks)} blocks, ~{total_words} words, ~{est_min:.1f} min audio")
 
@@ -511,9 +617,16 @@ def main():
     # --- Assign timings to display words ---
     per_block_timings = assign_timings(blocks, whisper_words, block_offsets)
 
+    # --- Extract references and figures (fast, no reprocessing needed) ---
+    print(f"\nExtracting references and figures from PDF…")
+    refs = extract_references(str(pdf_path))
+    figures = extract_figure_images(str(pdf_path))
+    print(f"  {len(refs)} references, {len(figures)} figures extracted")
+
     # --- Generate HTML ---
-    print(f"\nGenerating HTML viewer…")
-    generate_html(blocks, per_block_timings, wav_path.name, html_path)
+    print(f"Generating HTML viewer…")
+    generate_html(blocks, per_block_timings, wav_path.name, html_path,
+                  refs=refs, figures=figures)
 
     # --- Summary ---
     dur = len(full_audio) / SAMPLE_RATE
@@ -537,7 +650,7 @@ def main():
 
 def _estimate_offsets(blocks: list[Block], total_samples: int) -> list[tuple[int, int]]:
     """Estimate per-block audio offsets by word-count proportion."""
-    word_counts = [max(len(b.text.split()), 1) for b in blocks]
+    word_counts = [max(len(b.tts_text.split()), 1) for b in blocks]
     total = sum(word_counts)
     offsets = []
     cursor = 0
