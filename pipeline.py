@@ -743,9 +743,13 @@ player.addEventListener('ended',()=>btnPlay.textContent='▶');
 btnBack.addEventListener('click',()=>player.currentTime=Math.max(0,player.currentTime-10));
 speedSel.addEventListener('change',()=>player.playbackRate=parseFloat(speedSel.value));
 
-/* ── Chapter markers ── */
-player.addEventListener('loadedmetadata',()=>{{
+/* ── Chapter markers ──
+   The audio metadata often finishes loading while the browser is still
+   parsing the (large) content HTML above this script, i.e. before the
+   loadedmetadata listener exists — so also render immediately if ready. */
+function renderChapters(){{
   const dur=player.duration;
+  if(!isFinite(dur)||dur<=0||progWrap.querySelector('.ch-mark'))return;
   CHAPTERS.forEach(ch=>{{
     const mk=document.createElement('div');
     mk.className='ch-mark';
@@ -758,7 +762,10 @@ player.addEventListener('loadedmetadata',()=>{{
     }});
     progWrap.appendChild(mk);
   }});
-}});
+}}
+player.addEventListener('loadedmetadata',renderChapters);
+player.addEventListener('durationchange',renderChapters);
+if(player.readyState>=1)renderChapters();
 
 /* ── Progress bar scrubbing ── */
 function seekTo(e){{
