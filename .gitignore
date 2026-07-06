@@ -7,3 +7,7 @@ __pycache__/
 .venv/
 *.pyc
 timestamps.json
+xcuserdata/
+.DS_Store
+*.log
+manifest.json

@@ -58,6 +58,24 @@ The viewer works in any mobile browser. Features:
 - Auto-scroll pauses for 3 s when you manually scroll
 - Dark mode support
 
+## iOS app (offline reading)
+
+`ios/PDFTTSReader.xcodeproj` is a SwiftUI app that downloads documents to the
+phone so nothing needs to stream. It reuses each document's `viewer.html`
+unchanged — same word highlighting, tap-to-seek, and chapter marks.
+
+1. On the computer, serve this folder: `cd pdf_tts && python3 -m http.server 8080`
+2. Open the project in Xcode, set your signing team, build to your iPhone.
+3. In the app, set the server URL (defaults to `http://192.168.1.121:8080`),
+   pull to refresh, and tap ⬇ next to a document. It downloads `viewer.html`
+   plus the MP3 (sizes come from `manifest.json`) into the app's storage.
+4. Read/listen fully offline. Playback position is saved natively (shared
+   with the viewer's own resume logic) and audio keeps playing with the
+   screen locked. Swipe a downloaded document to delete it.
+
+Older manifests without the `audio`/`*_bytes` fields still work — the app
+falls back to extracting the audio filename from the downloaded viewer.
+
 ## Known limitations (prototype)
 
 - **Multi-column PDFs**: PyMuPDF may interleave columns; use single-column or converted PDFs for best results.
