@@ -18,6 +18,11 @@ struct LibraryView: View {
                     }
                 }
             }
+            .navigationDestination(for: String.self) { docID in
+                if let doc = library.localDocs.first(where: { $0.id == docID }) {
+                    ReaderView(doc: doc)
+                }
+            }
             .navigationTitle("TTS Library")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -70,11 +75,6 @@ struct LibraryView: View {
                         Label("Delete", systemImage: "trash")
                     }
                 }
-            }
-        }
-        .navigationDestination(for: String.self) { docID in
-            if let doc = library.localDocs.first(where: { $0.id == docID }) {
-                ReaderView(doc: doc)
             }
         }
     }
