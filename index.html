@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+  <title>TTS Library</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #111827;
+      color: #e5e7eb;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      min-height: 100vh;
+      padding: 24px 16px 48px;
+    }
+
+    header {
+      max-width: 680px;
+      margin: 0 auto 28px;
+    }
+    header h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: #f9fafb;
+      letter-spacing: -0.02em;
+    }
+    header p {
+      font-size: 0.85rem;
+      color: #6b7280;
+      margin-top: 4px;
+    }
+
+    #cards {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      max-width: 680px;
+      margin: 0 auto;
+    }
+
+    .card {
+      background: #1f2937;
+      border: 1px solid #374151;
+      border-radius: 14px;
+      padding: 20px;
+      transition: border-color 0.15s;
+    }
+    .card:hover { border-color: #6366f1; }
+
+    .card-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .card-flag {
+      font-size: 1.6rem;
+      line-height: 1;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+    .card-info { flex: 1; min-width: 0; }
+    .card-title {
+      font-size: 1rem;
+      font-weight: 600;
+      color: #f3f4f6;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .card-meta {
+      font-size: 0.78rem;
+      color: #9ca3af;
+      margin-top: 3px;
+    }
+
+    .progress-track {
+      background: #374151;
+      border-radius: 4px;
+      height: 5px;
+      margin-bottom: 8px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      background: #6366f1;
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.4s ease;
+    }
+    .progress-fill.complete { background: #10b981; }
+
+    .progress-label {
+      font-size: 0.78rem;
+      color: #9ca3af;
+      margin-bottom: 14px;
+    }
+
+    .buttons {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      display: inline-block;
+      padding: 8px 18px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      text-decoration: none;
+      cursor: pointer;
+      border: none;
+      transition: opacity 0.15s, background 0.15s;
+    }
+    .btn:active { opacity: 0.75; }
+    .btn-primary {
+      background: #6366f1;
+      color: #fff;
+    }
+    .btn-primary:hover { background: #4f46e5; }
+    .btn-ghost {
+      background: #374151;
+      color: #d1d5db;
+    }
+    .btn-ghost:hover { background: #4b5563; }
+
+    #status {
+      text-align: center;
+      color: #6b7280;
+      font-size: 0.9rem;
+      padding: 60px 0;
+    }
+    #status.error { color: #f87171; }
+
+    .badge {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 99px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      background: #374151;
+      color: #9ca3af;
+      margin-left: 6px;
+      vertical-align: middle;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>TTS Library</h1>
+    <p>Your synchronized read-along documents</p>
+  </header>
+
+  <div id="cards">
+    <div id="status">Loading…</div>
+  </div>
+
+  <script>
+    const FLAGS = {
+      en: '🇺🇸', 'en-gb': '🇬🇧',
+      de: '🇩🇪', fr: '🇫🇷', es: '🇪🇸',
+      it: '🇮🇹', ja: '🇯🇵', zh: '🇨🇳',
+      pt: '🇧🇷', hi: '🇮🇳', ko: '🇰🇷',
+      ru: '🇷🇺', nl: '🇳🇱', pl: '🇵🇱',
+      ar: '🇸🇦', tr: '🇹🇷', und: '📄',
+    };
+
+    function flag(lang) {
+      return FLAGS[lang && lang.toLowerCase()] || '📄';
+    }
+
+    function fmtSecs(s) {
+      s = Math.max(0, s);
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sc = Math.floor(s % 60);
+      if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(sc).padStart(2,'0')}`;
+      return `${m}:${String(sc).padStart(2,'0')}`;
+    }
+
+    function fmtDuration(min) {
+      if (min >= 60) {
+        const h = Math.floor(min / 60);
+        const m = Math.round(min % 60);
+        return m > 0 ? `${h}h ${m}m` : `${h}h`;
+      }
+      return `${Math.round(min)} min`;
+    }
+
+    function savedPos(docId) {
+      return parseFloat(localStorage.getItem('tts_pos_' + docId) || '0');
+    }
+
+    function buildCard(doc) {
+      const pos = savedPos(doc.id);
+      const totalSecs = doc.duration_min * 60;
+      const pct = totalSecs > 0 ? Math.min(100, pos / totalSecs * 100) : 0;
+      const started = pos > 30;
+      const complete = pct >= 98;
+
+      const card = document.createElement('div');
+      card.className = 'card';
+
+      let progressLabel;
+      if (complete) {
+        progressLabel = `Completed · ${fmtDuration(doc.duration_min)}`;
+      } else if (started) {
+        progressLabel = `${fmtSecs(pos)} of ${fmtDuration(doc.duration_min)} · ${pct.toFixed(0)}% complete`;
+      } else {
+        progressLabel = `Not started · ${fmtDuration(doc.duration_min)}`;
+      }
+
+      const langBadge = doc.language && doc.language !== 'und'
+        ? `<span class="badge">${doc.language.toUpperCase()}</span>`
+        : '';
+
+      card.innerHTML = `
+        <div class="card-header">
+          <div class="card-flag">${flag(doc.language)}</div>
+          <div class="card-info">
+            <div class="card-title">${escHtml(doc.title)}${langBadge}</div>
+            <div class="card-meta">Generated ${doc.generated}</div>
+          </div>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill${complete ? ' complete' : ''}" style="width:${pct.toFixed(1)}%"></div>
+        </div>
+        <div class="progress-label">${progressLabel}</div>
+        <div class="buttons" id="btns-${doc.id}"></div>
+      `;
+
+      const btns = card.querySelector(`#btns-${doc.id}`);
+
+      const openBtn = document.createElement('a');
+      openBtn.className = 'btn btn-primary';
+      openBtn.href = doc.viewer;
+      openBtn.textContent = started && !complete ? `▶  Resume at ${fmtSecs(pos)}` : '▶  Start';
+      btns.appendChild(openBtn);
+
+      if (started) {
+        const restartBtn = document.createElement('button');
+        restartBtn.className = 'btn btn-ghost';
+        restartBtn.textContent = '↩  Restart';
+        restartBtn.addEventListener('click', () => {
+          localStorage.removeItem('tts_pos_' + doc.id);
+          location.reload();
+        });
+        btns.appendChild(restartBtn);
+      }
+
+      return card;
+    }
+
+    function escHtml(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    async function init() {
+      const container = document.getElementById('cards');
+      const status = document.getElementById('status');
+
+      let manifest;
+      try {
+        const res = await fetch('manifest.json?' + Date.now());
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        manifest = await res.json();
+      } catch (e) {
+        status.className = 'error';
+        status.textContent = 'Could not load manifest.json — run the pipeline to generate documents, then serve this folder with: python3 serve.py 8080';
+        return;
+      }
+
+      status.remove();
+
+      if (!manifest.documents || manifest.documents.length === 0) {
+        const msg = document.createElement('div');
+        msg.id = 'status';
+        msg.textContent = 'No documents yet. Run the pipeline on a PDF to get started.';
+        container.appendChild(msg);
+        return;
+      }
+
+      for (const doc of manifest.documents) {
+        container.appendChild(buildCard(doc));
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

@@ -15,7 +15,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Server URL")
                 } footer: {
-                    Text("Address of the computer serving the pdf_tts folder. Start it with:\n\ncd ~/agents/pdf_tts && python3 -m http.server 8080")
+                    Text("Address of the computer serving the pdf_tts folder. Start it with:\n\ncd ~/agents/pdf_tts && python3 serve.py 8080")
                 }
             }
             .navigationTitle("Settings")

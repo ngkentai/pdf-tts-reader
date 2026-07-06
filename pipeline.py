@@ -1174,8 +1174,8 @@ def main():
     embedded_note = "  ← self-contained, copy to iPhone" if embed_audio else ""
     print(f"  Viewer: {html_path}  ({html_mb:.0f} MB){embedded_note}")
     print(f"{'─'*50}")
-    print(f"\nServe locally for phone access:")
-    print(f"  cd \"{output_dir}\" && python3 -m http.server 8080\n")
+    print(f"\nServe locally for phone access (serve.py supports audio seeking):")
+    print(f"  cd \"{Path(__file__).parent}\" && python3 serve.py 8080\n")
 
     # Try to print QR code with local IP
     try:

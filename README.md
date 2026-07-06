@@ -46,7 +46,7 @@ paper_tts/
 After the pipeline completes, it prints a command + QR code:
 
 ```bash
-cd paper_tts && python3 -m http.server 8080
+cd pdf_tts && python3 serve.py 8080
 # Then scan the QR code or open http://<local-ip>:8080/viewer.html
 ```
 
@@ -64,7 +64,9 @@ The viewer works in any mobile browser. Features:
 phone so nothing needs to stream. It reuses each document's `viewer.html`
 unchanged — same word highlighting, tap-to-seek, and chapter marks.
 
-1. On the computer, serve this folder: `cd pdf_tts && python3 -m http.server 8080`
+1. On the computer, serve this folder: `cd pdf_tts && python3 serve.py 8080`
+   (not `python3 -m http.server` — it lacks HTTP Range support, which breaks
+   audio seeking for browser streaming)
 2. Open the project in Xcode, set your signing team, build to your iPhone.
 3. In the app, set the server URL (defaults to `http://192.168.1.121:8080`),
    pull to refresh, and tap ⬇ next to a document. It downloads `viewer.html`
